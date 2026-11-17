@@ -3,7 +3,6 @@
 
 import Foundation
 import HealthKit
-import SwiftJWT
 
 class PushNotificationManager {
     private var deviceToken: String
@@ -19,50 +18,18 @@ class PushNotificationManager {
         deviceToken = Storage.shared.deviceToken.value
         sharedSecret = Storage.shared.sharedSecret.value
         productionEnvironment = Storage.shared.productionEnvironment.value
-        apnsKey = Storage.shared.apnsKey.value
-        teamId = Storage.shared.teamId.value ?? ""
-        keyId = Storage.shared.keyId.value
         user = Storage.shared.user.value
         bundleId = Storage.shared.bundleId.value
-    }
 
-    private func createReturnNotificationInfo() -> CommandPayload.ReturnNotificationInfo? {
-        let loopFollowDeviceToken = Observable.shared.loopFollowDeviceToken.value
-
-        guard !loopFollowDeviceToken.isEmpty else {
-            return nil
-        }
-
-        guard let loopFollowTeamID = BuildDetails.default.teamID, !loopFollowTeamID.isEmpty else {
-            LogManager.shared.log(category: .apns, message: "LoopFollow Team ID not found in BuildDetails.plist. Cannot create return notification info.")
-            return nil
-        }
-
-        let teamIdsAreDifferent = loopFollowTeamID != teamId
-        let keyIdForReturn: String
-        let apnsKeyForReturn: String
-
-        if teamIdsAreDifferent {
-            keyIdForReturn = Storage.shared.returnKeyId.value
-            apnsKeyForReturn = Storage.shared.returnApnsKey.value
-        } else {
-            keyIdForReturn = keyId
-            apnsKeyForReturn = apnsKey
-        }
-
-        guard !keyIdForReturn.isEmpty, !apnsKeyForReturn.isEmpty else {
-            LogManager.shared.log(category: .apns, message: "Missing required return APNS credentials. Check Remote Settings.")
-            return nil
-        }
-
-        return CommandPayload.ReturnNotificationInfo(
-            productionEnvironment: BuildDetails.default.isTestFlightBuild(),
-            deviceToken: loopFollowDeviceToken,
-            bundleId: Bundle.main.bundleIdentifier ?? "",
-            teamId: loopFollowTeamID,
-            keyId: keyIdForReturn,
-            apnsKey: apnsKeyForReturn
+        let resolved = RemoteSigningKey.resolve(
+            lfTeamID: BuildDetails.default.teamID ?? "",
+            remoteTeamID: Storage.shared.teamId.value ?? "",
+            lfKey: (Storage.shared.lfApnsKey.value, Storage.shared.lfKeyId.value),
+            remoteKey: (Storage.shared.remoteApnsKey.value, Storage.shared.remoteKeyId.value)
         )
+        apnsKey = resolved.key
+        keyId = resolved.keyID
+        teamId = resolved.teamID
     }
 
     func sendOverridePushNotification(override: ProfileManager.TrioOverride, completion: @escaping (Bool, String?) -> Void) {
@@ -71,9 +38,9 @@ class PushNotificationManager {
             commandType: .startOverride,
             timestamp: Date().timeIntervalSince1970,
             overrideName: override.name,
-            returnNotification: createReturnNotificationInfo()
+            returnNotification: ReturnNotificationInfo.loopFollow()
         )
-        sendEncryptedCommand(payload: payload, completion: completion)
+        sendEncryptedCommand(payload: payload, completion: RemoteCommandRefresh.following(.override, completion))
     }
 
     func sendCancelOverridePushNotification(completion: @escaping (Bool, String?) -> Void) {
@@ -82,9 +49,9 @@ class PushNotificationManager {
             commandType: .cancelOverride,
             timestamp: Date().timeIntervalSince1970,
             overrideName: nil,
-            returnNotification: createReturnNotificationInfo()
+            returnNotification: ReturnNotificationInfo.loopFollow()
         )
-        sendEncryptedCommand(payload: payload, completion: completion)
+        sendEncryptedCommand(payload: payload, completion: RemoteCommandRefresh.following(.override, completion))
     }
 
     func sendBolusPushNotification(bolusAmount: HKQuantity, completion: @escaping (Bool, String?) -> Void) {
@@ -94,9 +61,9 @@ class PushNotificationManager {
             commandType: .bolus,
             timestamp: Date().timeIntervalSince1970,
             bolusAmount: bolusAmountDecimal,
-            returnNotification: createReturnNotificationInfo()
+            returnNotification: ReturnNotificationInfo.loopFollow()
         )
-        sendEncryptedCommand(payload: payload, completion: completion)
+        sendEncryptedCommand(payload: payload, completion: RemoteCommandRefresh.following(.bolus(units: bolusAmount.doubleValue(for: .internationalUnit())), completion))
     }
 
     func sendTempTargetPushNotification(target: HKQuantity, duration: HKQuantity, completion: @escaping (Bool, String?) -> Void) {
@@ -108,9 +75,9 @@ class PushNotificationManager {
             timestamp: Date().timeIntervalSince1970,
             target: targetValue,
             duration: durationValue,
-            returnNotification: createReturnNotificationInfo()
+            returnNotification: ReturnNotificationInfo.loopFollow()
         )
-        sendEncryptedCommand(payload: payload, completion: completion)
+        sendEncryptedCommand(payload: payload, completion: RemoteCommandRefresh.following(.tempTarget, completion))
     }
 
     func sendCancelTempTargetPushNotification(completion: @escaping (Bool, String?) -> Void) {
@@ -118,9 +85,9 @@ class PushNotificationManager {
             user: user,
             commandType: .cancelTempTarget,
             timestamp: Date().timeIntervalSince1970,
-            returnNotification: createReturnNotificationInfo()
+            returnNotification: ReturnNotificationInfo.loopFollow()
         )
-        sendEncryptedCommand(payload: payload, completion: completion)
+        sendEncryptedCommand(payload: payload, completion: RemoteCommandRefresh.following(.tempTarget, completion))
     }
 
     func sendMealPushNotification(
@@ -158,10 +125,64 @@ class PushNotificationManager {
             protein: proteinValue,
             fat: fatValue,
             scheduledTime: scheduledTimeInterval,
-            returnNotification: createReturnNotificationInfo()
+            returnNotification: ReturnNotificationInfo.loopFollow()
+        )
+        sendEncryptedCommand(payload: payload, completion: RemoteCommandRefresh.following(
+            .meal(grams: Double(carbsValue ?? 0), bolus: bolusAmount.doubleValue(for: .internationalUnit())),
+            completion
+        ))
+    }
+
+    /// Trio confirms edit/delete through a return notification, so LoopFollow's own APNs credentials are required.
+    func sendDeleteMealPushNotification(mealID: String, commandID: String, completion: @escaping (Bool, String?) -> Void) {
+        guard let returnNotification = ReturnNotificationInfo.loopFollow() else {
+            completion(false, Self.returnNotificationRequiredMessage)
+            return
+        }
+        let payload = CommandPayload(
+            user: user,
+            commandType: .deleteMeal,
+            timestamp: Date().timeIntervalSince1970,
+            commandID: commandID,
+            mealID: mealID,
+            returnNotification: returnNotification
         )
         sendEncryptedCommand(payload: payload, completion: completion)
     }
+
+    func sendEditMealPushNotification(
+        mealID: String,
+        commandID: String,
+        carbs: Int,
+        fat: Int,
+        protein: Int,
+        scheduledTime: Date,
+        completion: @escaping (Bool, String?) -> Void
+    ) {
+        guard carbs >= 0, fat >= 0, protein >= 0, carbs > 0 || fat > 0 || protein > 0 else {
+            completion(false, "No nutrient data provided. At least one of carbs, fat, or protein must be greater than 0.")
+            return
+        }
+        guard let returnNotification = ReturnNotificationInfo.loopFollow() else {
+            completion(false, Self.returnNotificationRequiredMessage)
+            return
+        }
+        let payload = CommandPayload(
+            user: user,
+            commandType: .editMeal,
+            timestamp: Date().timeIntervalSince1970,
+            carbs: carbs,
+            protein: protein,
+            fat: fat,
+            scheduledTime: scheduledTime.timeIntervalSince1970,
+            commandID: commandID,
+            mealID: mealID,
+            returnNotification: returnNotification
+        )
+        sendEncryptedCommand(payload: payload, completion: completion)
+    }
+
+    private static let returnNotificationRequiredMessage = "Editing or deleting a meal needs LoopFollow's own APNS credentials so Trio can confirm the result. Configure them in App Settings → APN."
 
     private func validateCredentials() -> [String]? {
         var errors = [String]()
@@ -229,20 +250,6 @@ class PushNotificationManager {
             return
         }
 
-        guard let url = constructAPNsURL() else {
-            let errorMessage = "Failed to construct APNs URL"
-            LogManager.shared.log(category: .apns, message: errorMessage)
-            completion(false, errorMessage)
-            return
-        }
-
-        guard let jwt = JWTManager.shared.getOrGenerateJWT(keyId: keyId, teamId: teamId, apnsKey: apnsKey) else {
-            let errorMessage = "Failed to generate JWT, please check that the token is correct."
-            LogManager.shared.log(category: .apns, message: errorMessage)
-            completion(false, errorMessage)
-            return
-        }
-
         do {
             guard let messenger = SecureMessenger(sharedSecret: sharedSecret) else {
                 let errorMessage = "Failed to initialize security module. Check shared secret."
@@ -252,81 +259,24 @@ class PushNotificationManager {
             }
 
             let encryptedDataString = try messenger.encrypt(payload)
-            let finalMessage = EncryptedPushMessage(encryptedData: encryptedDataString)
+            let finalMessage = EncryptedPushMessage(encryptedData: encryptedDataString, commandType: payload.commandType)
 
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("bearer \(jwt)", forHTTPHeaderField: "authorization")
-            request.setValue("application/json", forHTTPHeaderField: "content-type")
-            request.setValue("10", forHTTPHeaderField: "apns-priority")
-            request.setValue("0", forHTTPHeaderField: "apns-expiration")
-            request.setValue(bundleId, forHTTPHeaderField: "apns-topic")
-            request.setValue("background", forHTTPHeaderField: "apns-push-type")
-
-            request.httpBody = try JSONEncoder().encode(finalMessage)
-
-            let task = URLSession.shared.dataTask(with: request) { data, response, error in
-                if let error = error {
-                    let errorMessage = "Failed to send push notification: \(error.localizedDescription)"
-                    LogManager.shared.log(category: .apns, message: errorMessage)
-                    completion(false, errorMessage)
-                    return
-                }
-
-                if let httpResponse = response as? HTTPURLResponse {
-                    print("Push notification sent.")
-                    print("Status code: \(httpResponse.statusCode)")
-
-                    var responseBodyMessage = ""
-                    if let data = data, let responseBody = String(data: data, encoding: .utf8) {
-                        print("Response body: \(responseBody)")
-                        if let json = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
-                           let reason = json["reason"] as? String
-                        {
-                            responseBodyMessage = reason
-                        }
-                    }
-
-                    switch httpResponse.statusCode {
-                    case 200:
-                        completion(true, nil)
-                    case 400:
-                        completion(false, "Bad request. The request was invalid or malformed. \(responseBodyMessage)")
-                    case 403:
-                        completion(false, "Authentication error. Check your certificate or authentication token. \(responseBodyMessage)")
-                    case 404:
-                        completion(false, "Invalid request: The :path value was incorrect. \(responseBodyMessage)")
-                    case 405:
-                        completion(false, "Invalid request: Only POST requests are supported. \(responseBodyMessage)")
-                    case 410:
-                        completion(false, "The device token is no longer active for the topic. \(responseBodyMessage)")
-                    case 413:
-                        completion(false, "Payload too large. The notification payload exceeded the size limit. \(responseBodyMessage)")
-                    case 429:
-                        completion(false, "Too many requests. \(responseBodyMessage)")
-                    case 500:
-                        completion(false, "Internal server error at APNs. \(responseBodyMessage)")
-                    case 503:
-                        completion(false, "Service unavailable. The server is temporarily unavailable. Try again later. \(responseBodyMessage)")
-                    default:
-                        completion(false, "Unexpected status code: \(httpResponse.statusCode). \(responseBodyMessage)")
-                    }
-                } else {
-                    completion(false, "Failed to get a valid HTTP response.")
-                }
-            }
-            task.resume()
-
+            try APNSDelivery.send(
+                body: JSONEncoder().encode(finalMessage),
+                deviceToken: deviceToken,
+                topic: bundleId,
+                production: productionEnvironment,
+                keyId: keyId,
+                teamId: teamId,
+                apnsKey: apnsKey,
+                expiration: "600",
+                collapseID: payload.apnsCollapseID,
+                completion: completion
+            )
         } catch {
             let errorMessage = "Failed to encode or encrypt push message: \(error.localizedDescription)"
             LogManager.shared.log(category: .apns, message: errorMessage)
             completion(false, errorMessage)
         }
-    }
-
-    private func constructAPNsURL() -> URL? {
-        let host = productionEnvironment ? "api.push.apple.com" : "api.sandbox.push.apple.com"
-        let urlString = "https://\(host)/3/device/\(deviceToken)"
-        return URL(string: urlString)
     }
 }

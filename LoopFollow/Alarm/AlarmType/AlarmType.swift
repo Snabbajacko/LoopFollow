@@ -16,9 +16,11 @@ enum AlarmType: String, CaseIterable, Codable {
     case missedReading = "Missed Reading Alert"
     case notLooping = "Not Looping Alert"
     case missedBolus = "Missed Bolus Alert"
+    case futureCarbs = "Future Carbs Alert"
     case sensorChange = "Sensor Change Alert"
     case pumpChange = "Pump Change Alert"
     case pump = "Pump Insulin Alert"
+    case pumpBattery = "Pump Battery Alert"
     case battery = "Low Battery"
     case batteryDrop = "Battery Drop"
     case recBolus = "Rec. Bolus"
@@ -27,6 +29,7 @@ enum AlarmType: String, CaseIterable, Codable {
     case tempTargetStart = "Temp Target Started"
     case tempTargetEnd = "Temp Target Ended"
     case buildExpire = "Looping app expiration"
+    case dbSize = "Nightscout Database Size"
 }
 
 extension AlarmType {

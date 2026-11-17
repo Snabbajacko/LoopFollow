@@ -10,20 +10,12 @@ extension MainViewController {
         carbData.removeAll()
         var lastFoundIndex = 0
         var lastFoundBolus = 0
+        var lastFoundSmb = 0
 
         for currentEntry in entries.reversed() {
-            var carbDate: String
-            if currentEntry["timestamp"] != nil {
-                carbDate = currentEntry["timestamp"] as! String
-            } else if currentEntry["created_at"] != nil {
-                carbDate = currentEntry["created_at"] as! String
-            } else {
-                continue
-            }
-
             let absorptionTime = currentEntry["absorptionTime"] as? Int ?? 0
 
-            guard let parsedDate = NightscoutUtils.parseDate(carbDate),
+            guard let parsedDate = NightscoutUtils.treatmentDate(from: currentEntry),
                   let carbs = currentEntry["carbs"] as? Double else { continue }
 
             let dateTimeStamp = parsedDate.timeIntervalSince1970
@@ -35,12 +27,21 @@ extension MainViewController {
                 let bolusTime = findNearestBolusbyTime(timeWithin: 300, needle: dateTimeStamp, haystack: bolusData, startingIndex: lastFoundBolus)
                 lastFoundBolus = bolusTime.foundIndex
 
-                offset = bolusTime.offset ? 70 : 20
+                let smbTime = findNearestBolusbyTime(timeWithin: 300, needle: dateTimeStamp, haystack: smbData, startingIndex: lastFoundSmb)
+                lastFoundSmb = smbTime.foundIndex
+
+                offset = (bolusTime.offset || smbTime.offset) ? 70 : 20
             }
 
             if dateTimeStamp < (dateTimeUtils.getNowTimeIntervalUTC() + (3600 * Storage.shared.predictionToLoad.value)) {
                 // Make the dot
-                let dot = carbGraphStruct(value: Double(carbs), date: Double(dateTimeStamp), sgv: Int(sgv.sgv + Double(offset)), absorptionTime: absorptionTime)
+                let dot = carbGraphStruct(
+                    value: Double(carbs),
+                    date: Double(dateTimeStamp),
+                    sgv: Int(sgv.sgv + Double(offset)),
+                    absorptionTime: absorptionTime,
+                    detail: Treatment.historyEntries(from: currentEntry, date: dateTimeStamp) { Int(sgv.sgv) }.carb
+                )
                 carbData.append(dot)
             }
         }
@@ -81,6 +82,7 @@ extension MainViewController {
         }
 
         let resultString = String(format: "%.0f", totalCarbs)
-        infoManager.updateInfoData(type: .carbsToday, value: resultString)
+        infoManager.updateInfoData(type: .carbsToday, value: resultString, numericValue: totalCarbs)
+        Storage.shared.lastCarbsToday.value = totalCarbs
     }
 }

@@ -213,12 +213,16 @@ struct AlarmSelectionRow: View {
             return "Not Looping Alert"
         case .missedBolus:
             return "Missed Bolus Alert"
+        case .futureCarbs:
+            return "Future Carbs Alert"
         case .sensorChange:
             return "Sensor Change Alert"
         case .pumpChange:
             return "Pump Change Alert"
         case .pump:
             return "Pump Insulin Alert"
+        case .pumpBattery:
+            return "Pump Battery Alert"
         case .battery:
             return "Low Battery"
         case .batteryDrop:
@@ -235,6 +239,8 @@ struct AlarmSelectionRow: View {
             return "Temp Target Ended"
         case .buildExpire:
             return "Looping app expiration"
+        case .dbSize:
+            return "Nightscout Database Size"
         }
     }
 }

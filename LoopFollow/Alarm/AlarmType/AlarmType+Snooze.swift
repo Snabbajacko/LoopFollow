@@ -7,16 +7,16 @@ extension AlarmType {
     /// What “unit” we use for snoozeDuration for this alarmType.
     var snoozeTimeUnit: TimeUnit {
         switch self {
-        case .buildExpire:
+        case .buildExpire, .dbSize:
             return .day
         case .low, .high, .fastDrop, .fastRise,
              .missedReading, .notLooping, .missedBolus,
-             .recBolus,
+             .futureCarbs, .recBolus,
              .overrideStart, .overrideEnd, .tempTargetStart,
              .tempTargetEnd:
             return .minute
         case .battery, .batteryDrop, .sensorChange, .pumpChange, .cob, .iob,
-             .pump:
+             .pump, .pumpBattery:
             return .hour
         case .temporary:
             return .none

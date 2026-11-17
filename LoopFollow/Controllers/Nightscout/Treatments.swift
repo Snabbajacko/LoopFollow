@@ -4,16 +4,51 @@
 import Foundation
 
 extension MainViewController {
+    private struct TreatmentOccurrence: Hashable {
+        let id: String
+        let eventType: String?
+        let date: Date?
+    }
+
+    /// Nightscout duplicates can have different MongoDB `_id` values. Trio FPU siblings share an `id` but have distinct
+    /// times, so deduplicate by logical occurrence rather than `id`.
+    static func deduplicatedTreatmentEntries(_ entries: [[String: AnyObject]]) -> [[String: AnyObject]] {
+        var seenOccurrences = Set<TreatmentOccurrence>()
+        return entries.filter { entry in
+            guard let id = entry["id"] as? String, !id.isEmpty else { return true }
+            let eventType = entry["eventType"] as? String
+            let occurrence = TreatmentOccurrence(
+                id: id,
+                eventType: eventType,
+                date: treatmentOccurrenceDate(entry, eventType: eventType)
+            )
+            return seenOccurrences.insert(occurrence).inserted
+        }
+    }
+
+    private static func treatmentOccurrenceDate(_ entry: [String: AnyObject], eventType: String?) -> Date? {
+        let rawDate: String?
+        switch eventType {
+        case "Pump Site Change", "Site Change", "Sensor Start", "Insulin Change":
+            rawDate = entry["created_at"] as? String
+        default:
+            rawDate = (entry["timestamp"] as? String) ?? (entry["created_at"] as? String)
+        }
+        return rawDate.flatMap(NightscoutUtils.parseDate)
+    }
+
     // NS Treatments Web Call
     // Downloads Basal, Bolus, Carbs, BG Check, Notes, Overrides
     func WebLoadNSTreatments() {
         if !Storage.shared.downloadTreatments.value { return }
 
         let startTimeString = dateTimeUtils.getDateTimeString(addingDays: -1 * Storage.shared.downloadDays.value)
-        let currentTimeString = dateTimeUtils.getDateTimeString(addingHours: 6)
+        let endTimeString = dateTimeUtils.getDateTimeString(addingHours: 6)
+        let estimatedCount = max(Storage.shared.downloadDays.value * 100, 5000)
         let parameters: [String: String] = [
             "find[created_at][$gte]": startTimeString,
-            "find[created_at][$lte]": currentTimeString,
+            "find[created_at][$lte]": endTimeString,
+            "count": "\(estimatedCount)",
         ]
         NightscoutUtils.executeDynamicRequest(eventType: .treatments, parameters: parameters) { (result: Result<Any, Error>) in
             switch result {
@@ -33,6 +68,8 @@ extension MainViewController {
 
     // Process and split out treatments to individual tasks
     func updateTreatments(entries: [[String: AnyObject]]) {
+        let uniqueEntries = Self.deduplicatedTreatmentEntries(entries)
+
         var tempBasal: [[String: AnyObject]] = []
         var bolus: [[String: AnyObject]] = []
         var smb: [[String: AnyObject]] = []
@@ -47,7 +84,7 @@ extension MainViewController {
         var cgmSensorStart: [sageData] = []
         var insulinCartridge: [iageData] = []
 
-        for entry in entries {
+        for entry in uniqueEntries {
             guard let eventType = entry["eventType"] as? String else {
                 continue
             }
@@ -101,10 +138,21 @@ extension MainViewController {
         }
 
         if tempBasal.count > 0 {
-            processNSBasals(entries: tempBasal)
+            let suspensions = PumpSuspension.intervals(
+                notes: note.compactMap { entry in
+                    guard let date = NightscoutUtils.treatmentDate(from: entry), let text = entry["notes"] as? String else { return nil }
+                    return (date, text)
+                },
+                tempBasalStarts: tempBasal.compactMap { NightscoutUtils.treatmentDate(from: $0) }
+            )
+            processNSBasals(entries: tempBasal, suspensions: suspensions)
         } else {
             if basalData.count > 0 {
                 clearOldTempBasal()
+            }
+            if let profileBasal = profileManager.currentBasal() {
+                infoManager.updateInfoData(type: .basal, value: profileBasal)
+                Storage.shared.lastBasal.value = profileBasal
             }
         }
         if bolus.count > 0 {
@@ -177,7 +225,7 @@ extension MainViewController {
         if note.count > 0 {
             processNotes(entries: note)
         } else {
-            if noteGraphData.count > 0 {
+            if noteGraphData.count > 0 || cgmSensorStates.count > 0 {
                 clearOldNotes()
             }
         }

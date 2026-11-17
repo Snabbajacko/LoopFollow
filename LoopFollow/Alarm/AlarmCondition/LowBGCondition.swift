@@ -4,17 +4,34 @@
 import Foundation
 
 /// Fires when:
-/// • every BG in `persistentMinutes` (if set) **and** the latest BG are ≤ `threshold`; **or**
-/// • any predicted BG within `predictiveMinutes` is ≤ `threshold`.
+/// • every BG in `persistentMinutes` (if set) **and** the latest BG are ≤ `belowBG`; **or**
+/// • any predicted BG within `predictiveMinutes` is ≤ `belowBG`.
 struct LowBGCondition: AlarmCondition {
     static let type: AlarmType = .low
+
+    /// Longest predictive look-ahead offered by the alarm editor, in minutes.
+    static let maxPredictiveMinutes = 60
+
+    /// Number of forecast points (5-minute spacing) needed to look `minutes`
+    /// ahead: the first point is the current value, so the horizon takes
+    /// ceil(minutes / 5) points beyond it.
+    static func forecastPoints(forMinutes minutes: Int) -> Int {
+        Int(ceil(Double(minutes) / 5.0)) + 1
+    }
+
     init() {}
+
+    /// `belowBG` is this alarm's trigger threshold, not an activation limit:
+    /// the predictive look-ahead must be able to run while the latest BG is
+    /// still above it, so `evaluate` checks the threshold itself.
+    var checksOwnBGLimits: Bool { true }
 
     func evaluate(alarm: Alarm, data: AlarmData, now _: Date) -> Bool {
         // ────────────────────────────────
         // 0. sanity checks
         // ────────────────────────────────
         guard let belowBG = alarm.belowBG else { return false }
+        guard let latest = data.bgReadings.last, latest.sgv > 0 else { return false }
 
         func isLow(_ g: GlucoseValue) -> Bool {
             g.sgv > 0 && Double(g.sgv) <= belowBG
@@ -28,15 +45,9 @@ struct LowBGCondition: AlarmCondition {
            predictiveMinutes > 0,
            !data.predictionData.isEmpty
         {
-            let lookAhead = min(
-                data.predictionData.count,
-                Int(ceil(Double(predictiveMinutes) / 5.0))
-            )
+            let points = Self.forecastPoints(forMinutes: predictiveMinutes)
 
-            for i in 0 ..< lookAhead where isLow(data.predictionData[i]) {
-                predictiveTrigger = true
-                break
-            }
+            predictiveTrigger = data.predictionData.prefix(points).contains(where: isLow)
         }
 
         // ────────────────────────────────
@@ -58,8 +69,21 @@ struct LowBGCondition: AlarmCondition {
         }
 
         // ────────────────────────────────
-        // 3. final decision
+        // 3. rising BG suppression (optional)
+        //    Stay silent while the latest reading is above the previous one;
+        //    only alarm when BG is flat or still falling.
         // ────────────────────────────────
-        return persistentOK || predictiveTrigger
+        if alarm.suppressIfRising, data.bgReadings.count >= 2 {
+            let last = data.bgReadings[data.bgReadings.count - 1]
+            let previous = data.bgReadings[data.bgReadings.count - 2]
+            if last.sgv > 0, previous.sgv > 0, last.sgv > previous.sgv {
+                return false
+            }
+        }
+
+        // ────────────────────────────────
+        // 4. final decision
+        // ────────────────────────────────
+        return (isLow(latest) && persistentOK) || predictiveTrigger
     }
 }

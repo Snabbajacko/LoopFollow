@@ -4,13 +4,197 @@
 import Foundation
 import HealthKit
 
+enum GlucoseDisplayUnit: String, Codable, CaseIterable {
+    case mgdL = "mg/dL"
+    case mmolL = "mmol/L"
+
+    var fractionDigits: Int {
+        switch self {
+        case .mgdL:
+            return 0
+        case .mmolL:
+            return 1
+        }
+    }
+}
+
+/// The selectable range modes. To add one, define its low/high in `GlucoseThresholds`,
+/// then add a case here with a title and `fixedThresholds` pointing at those constants;
+/// the settings range list, stats card and toggle pick it up from `allCases`.
+/// The raw value is persisted, so don't change existing ones.
+enum TimeInRangeDisplayMode: String, Codable, CaseIterable {
+    case tir = "TIR"
+    case titr = "TITR"
+    case ting = "TING"
+    case custom = "Custom"
+
+    var title: String {
+        switch self {
+        case .tir: return "Time in Range"
+        case .titr: return "Time in Tight Range"
+        case .ting: return "Extended Tight Range"
+        case .custom: return "Custom Range"
+        }
+    }
+
+    /// Low/high cut-offs in mg/dL from `GlucoseThresholds`, or nil when the user's own low/high lines apply.
+    var fixedThresholds: (low: Double, high: Double)? {
+        switch self {
+        case .tir: return (GlucoseThresholds.tirLow, GlucoseThresholds.tirHigh)
+        case .titr: return (GlucoseThresholds.titrLow, GlucoseThresholds.titrHigh)
+        case .ting: return (GlucoseThresholds.tingLow, GlucoseThresholds.tingHigh)
+        case .custom: return nil
+        }
+    }
+
+    /// The mode after this one in `allCases`, wrapping around.
+    var next: TimeInRangeDisplayMode {
+        let all = Self.allCases
+        let index = all.firstIndex(of: self)!
+        return all[(index + 1) % all.count]
+    }
+}
+
+enum GlycemicMetricMode: String, Codable, CaseIterable {
+    case ehba1c = "eHbA1c"
+    case gmi = "GMI"
+}
+
+enum GlycemicOutputUnit: String, Codable, CaseIterable {
+    case percent = "%"
+    case mmolMol = "mmol/mol"
+}
+
+enum VariabilityMetricMode: String, Codable, CaseIterable {
+    case stdDeviation = "Std Deviation"
+    case cv = "CV"
+}
+
+final class UnitSettingsStore {
+    static let shared = UnitSettingsStore()
+
+    private init() {}
+
+    var glucoseUnit: GlucoseDisplayUnit {
+        get {
+            GlucoseDisplayUnit(rawValue: Storage.shared.units.value) ?? .mgdL
+        }
+        set {
+            Storage.shared.units.value = newValue.rawValue
+        }
+    }
+
+    var timeInRangeMode: TimeInRangeDisplayMode {
+        get {
+            TimeInRangeDisplayMode(rawValue: Storage.shared.timeInRangeModeRaw.value) ?? .tir
+        }
+        set {
+            Storage.shared.timeInRangeModeRaw.value = newValue.rawValue
+        }
+    }
+
+    /// Returns the effective low/high thresholds (in mg/dL) for the current range mode.
+    func effectiveThresholds() -> (low: Double, high: Double) {
+        timeInRangeMode.fixedThresholds ?? (Storage.shared.lowLine.value, Storage.shared.highLine.value)
+    }
+
+    /// Returns the very low, low, high and very high thresholds (in mg/dL) for
+    /// the current range mode. Very low and very high come from `GlucoseThresholds`,
+    /// or the range's own bounds when a custom range extends past them.
+    func effectiveBandThresholds() -> (veryLow: Double, low: Double, high: Double, veryHigh: Double) {
+        let range = effectiveThresholds()
+        return (
+            min(GlucoseThresholds.veryLow, range.low),
+            range.low,
+            range.high,
+            max(GlucoseThresholds.veryHigh, range.high)
+        )
+    }
+
+    var glycemicMetricMode: GlycemicMetricMode {
+        get {
+            Storage.shared.showGMI.value ? .gmi : .ehba1c
+        }
+        set {
+            Storage.shared.showGMI.value = (newValue == .gmi)
+        }
+    }
+
+    var glycemicOutputUnit: GlycemicOutputUnit {
+        get {
+            Storage.shared.useIFCC.value ? .mmolMol : .percent
+        }
+        set {
+            Storage.shared.useIFCC.value = (newValue == .mmolMol)
+        }
+    }
+
+    var variabilityMetricMode: VariabilityMetricMode {
+        get {
+            Storage.shared.showStdDev.value ? .stdDeviation : .cv
+        }
+        set {
+            Storage.shared.showStdDev.value = (newValue == .stdDeviation)
+        }
+    }
+
+    func convertMgdlToDisplay(_ mgdl: Double) -> Double {
+        switch glucoseUnit {
+        case .mgdL:
+            return mgdl
+        case .mmolL:
+            return mgdl * GlucoseConversion.mgDlToMmolL
+        }
+    }
+
+    func convertDisplayToMgdl(_ value: Double) -> Double {
+        switch glucoseUnit {
+        case .mgdL:
+            return value
+        case .mmolL:
+            return value * GlucoseConversion.mmolToMgDl
+        }
+    }
+}
+
+enum GlycemicMetricCalculator {
+    static func calculateEhba1c(avgGlucoseInDisplayUnits: Double?) -> Double? {
+        guard let avgGlucoseInDisplayUnits else { return nil }
+
+        switch UnitSettingsStore.shared.glycemicOutputUnit {
+        case .mmolMol:
+            let avgMmolL = UnitSettingsStore.shared.glucoseUnit == .mmolL
+                ? avgGlucoseInDisplayUnits
+                : avgGlucoseInDisplayUnits * GlucoseConversion.mgDlToMmolL
+            return avgMmolL * 6.936514699616532 - 6.628248828291433
+        case .percent:
+            let avgMgdL = UnitSettingsStore.shared.convertDisplayToMgdl(avgGlucoseInDisplayUnits)
+            return (avgMgdL + 46.7) / 28.7
+        }
+    }
+
+    static func calculateGMI(avgGlucoseInDisplayUnits: Double?) -> Double? {
+        guard let avgGlucoseInDisplayUnits else { return nil }
+
+        switch UnitSettingsStore.shared.glycemicOutputUnit {
+        case .percent:
+            let avgMgdL = UnitSettingsStore.shared.convertDisplayToMgdl(avgGlucoseInDisplayUnits)
+            return 3.31 + (0.02392 * avgMgdL)
+        case .mmolMol:
+            let avgMmolL = UnitSettingsStore.shared.glucoseUnit == .mmolL
+                ? avgGlucoseInDisplayUnits
+                : avgGlucoseInDisplayUnits * GlucoseConversion.mgDlToMmolL
+            return 12.71 + (4.70587 * avgMmolL)
+        }
+    }
+}
+
 class Localizer {
     static func getPreferredUnit() -> HKUnit {
-        let unitString = Storage.shared.units.value
-        switch unitString {
-        case "mmol/L":
+        switch UnitSettingsStore.shared.glucoseUnit {
+        case .mmolL:
             return .millimolesPerLiter
-        default:
+        case .mgdL:
             return .milligramsPerDeciliter
         }
     }
@@ -50,14 +234,9 @@ class Localizer {
         let numberFormatter = NumberFormatter()
         numberFormatter.numberStyle = .decimal
 
-        let units = unit ?? Storage.shared.units.value
-
-        if units == "mg/dL" {
-            numberFormatter.maximumFractionDigits = 0 // No decimal places for mg/dL
-        } else {
-            numberFormatter.maximumFractionDigits = 1 // Always one decimal place for mmol/L
-            numberFormatter.minimumFractionDigits = 1 // This ensures even .0 is displayed
-        }
+        let units = GlucoseDisplayUnit(rawValue: unit ?? UnitSettingsStore.shared.glucoseUnit.rawValue) ?? .mgdL
+        numberFormatter.maximumFractionDigits = units.fractionDigits
+        numberFormatter.minimumFractionDigits = units.fractionDigits
 
         numberFormatter.locale = Locale.current
 
@@ -68,18 +247,14 @@ class Localizer {
     static func toDisplayUnits(_ value: String) -> String {
         let numberFormatter = NumberFormatter()
         numberFormatter.numberStyle = .decimal
-
-        if Storage.shared.units.value == "mg/dL" {
-            numberFormatter.maximumFractionDigits = 0 // No decimal places for mg/dL
-        } else {
-            numberFormatter.maximumFractionDigits = 1 // Always one decimal place for mmol/L
-            numberFormatter.minimumFractionDigits = 1 // This ensures even .0 is displayed
-        }
+        let units = UnitSettingsStore.shared.glucoseUnit
+        numberFormatter.maximumFractionDigits = units.fractionDigits
+        numberFormatter.minimumFractionDigits = units.fractionDigits
 
         numberFormatter.locale = Locale.current
 
         if let number = Float(value) {
-            if Storage.shared.units.value == "mg/dL" {
+            if units == .mgdL {
                 let numberValue = NSNumber(value: number)
                 return numberFormatter.string(from: numberValue) ?? value
             } else {

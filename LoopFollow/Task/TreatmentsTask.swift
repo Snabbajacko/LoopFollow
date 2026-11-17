@@ -15,13 +15,21 @@ extension MainViewController {
     func treatmentsTaskAction() {
         // If Nightscout not enabled, wait 60s and try again
         guard IsNightscoutEnabled(), Storage.shared.downloadTreatments.value else {
+            if !cgmSensorStates.isEmpty {
+                cgmSensorStates.removeAll()
+                updateCGMSensorState()
+            }
             TaskScheduler.shared.rescheduleTask(id: .treatments, to: Date().addingTimeInterval(60))
             return
         }
 
         WebLoadNSTreatments()
 
-        TaskScheduler.shared.rescheduleTask(id: .treatments, to: Date().addingTimeInterval(2 * 60))
+        var interval: TimeInterval = 2 * 60
+        if NightscoutSocketManager.shared.connectionState == .authenticated {
+            interval = 10 * 60
+        }
+        TaskScheduler.shared.rescheduleTask(id: .treatments, to: Date().addingTimeInterval(interval))
         TaskScheduler.shared.rescheduleTask(id: .alarmCheck, to: Date().addingTimeInterval(3))
     }
 }

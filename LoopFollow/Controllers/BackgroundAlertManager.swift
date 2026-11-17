@@ -11,11 +11,24 @@ enum BackgroundAlertDuration: TimeInterval, CaseIterable {
     case eighteenMinutes = 1080 // 18 minutes in seconds
 }
 
-/// Enum representing unique identifiers for each background alert.
-enum BackgroundAlertIdentifier: String, CaseIterable {
-    case sixMin = "loopfollow.background.alert.6min"
-    case twelveMin = "loopfollow.background.alert.12min"
-    case eighteenMin = "loopfollow.background.alert.18min"
+/// Unique identifiers for each background alert, scoped to the current bundle
+/// so multiple LoopFollow instances don't interfere with each other's notifications.
+enum BackgroundAlertIdentifier: CaseIterable {
+    case sixMin
+    case twelveMin
+    case eighteenMin
+
+    private static let prefix = Bundle.main.bundleIdentifier ?? "loopfollow"
+
+    var rawValue: String {
+        switch self {
+        case .sixMin: "\(Self.prefix).background.alert.6min"
+        case .twelveMin: "\(Self.prefix).background.alert.12min"
+        case .eighteenMin: "\(Self.prefix).background.alert.18min"
+        }
+    }
+
+    static let categoryIdentifier = "\(prefix).background.alert"
 }
 
 class BackgroundAlertManager {
@@ -51,19 +64,22 @@ class BackgroundAlertManager {
     func scheduleBackgroundAlert(force: Bool = false) {
         guard isAlertScheduled, Storage.shared.backgroundRefreshType.value != .none else { return }
 
-        // Throttle execution if not forced: only run once every 10 seconds.
-        if !force {
-            let now = Date()
-            if let lastDate = lastScheduleDate, now.timeIntervalSince(lastDate) < 10 {
-                return
-            }
-            lastScheduleDate = now
+        // Throttle execution if not forced: only run once every 10 seconds. A forced
+        // run stamps the date too, so the next tick doesn't immediately repeat the
+        // remove-and-re-add it just performed.
+        let now = Date()
+        if !force, let lastDate = lastScheduleDate, now.timeIntervalSince(lastDate) < 10 {
+            return
         }
+        lastScheduleDate = now
 
         removeDeliveredNotifications()
 
         let isBluetoothActive = Storage.shared.backgroundRefreshType.value.isBluetooth
-        let expectedHeartbeat = BLEManager.shared.expectedHeartbeatInterval()
+        // Only query BLEManager for a Bluetooth mode — touching it otherwise would
+        // initialize CoreBluetooth and trigger the permission prompt for users
+        // (e.g. Silent Tune) who never opted into Bluetooth.
+        let expectedHeartbeat = isBluetoothActive ? BLEManager.shared.expectedHeartbeatInterval() : nil
 
         // Define alerts
         let alerts: [BackgroundAlert] = [
@@ -118,7 +134,7 @@ class BackgroundAlertManager {
         content.title = title
         content.body = body
         content.sound = .defaultCritical
-        content.categoryIdentifier = "loopfollow.background.alert"
+        content.categoryIdentifier = BackgroundAlertIdentifier.categoryIdentifier
         return content
     }
 

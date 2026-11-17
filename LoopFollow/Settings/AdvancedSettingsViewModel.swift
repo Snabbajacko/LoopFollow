@@ -10,33 +10,31 @@ class AdvancedSettingsViewModel: ObservableObject {
         }
     }
 
-    @Published var downloadPrediction: Bool {
-        didSet {
-            Storage.shared.downloadPrediction.value = downloadPrediction
-        }
-    }
-
     @Published var graphBasal: Bool {
         didSet {
             Storage.shared.graphBasal.value = graphBasal
+            Observable.shared.chartSettingsChanged.value = true
         }
     }
 
     @Published var graphBolus: Bool {
         didSet {
             Storage.shared.graphBolus.value = graphBolus
+            Observable.shared.chartSettingsChanged.value = true
         }
     }
 
     @Published var graphCarbs: Bool {
         didSet {
             Storage.shared.graphCarbs.value = graphCarbs
+            Observable.shared.chartSettingsChanged.value = true
         }
     }
 
     @Published var graphOtherTreatments: Bool {
         didSet {
             Storage.shared.graphOtherTreatments.value = graphOtherTreatments
+            Observable.shared.chartSettingsChanged.value = true
         }
     }
 
@@ -54,7 +52,6 @@ class AdvancedSettingsViewModel: ObservableObject {
 
     init() {
         downloadTreatments = Storage.shared.downloadTreatments.value
-        downloadPrediction = Storage.shared.downloadPrediction.value
         graphBasal = Storage.shared.graphBasal.value
         graphBolus = Storage.shared.graphBolus.value
         graphCarbs = Storage.shared.graphCarbs.value

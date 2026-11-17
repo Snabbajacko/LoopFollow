@@ -44,7 +44,8 @@ extension MainViewController {
                                    .withDashSeparatorInDate,
                                    .withColonSeparatorInTime]
 
-        if let iageTime = formatter.date(from: (lastIageString as! String))?.timeIntervalSince1970 {
+        if let iageTime = formatter.date(from: lastIageString)?.timeIntervalSince1970 {
+            Storage.shared.iageInsertTime.value = iageTime
             let now = dateTimeUtils.getNowTimeIntervalUTC()
             let secondsAgo = now - iageTime
 
@@ -54,7 +55,7 @@ extension MainViewController {
             formatter.zeroFormattingBehavior = [.pad]
 
             if let formattedDuration = formatter.string(from: secondsAgo) {
-                infoManager.updateInfoData(type: .iage, value: formattedDuration)
+                infoManager.updateInfoData(type: .iage, value: formattedDuration, numericValue: secondsAgo / 86400)
             }
         }
     }

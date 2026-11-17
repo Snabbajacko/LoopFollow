@@ -1,26 +1,48 @@
 // LoopFollow
 // NightScoutViewController.swift
 
+import Combine
 import UIKit
 import WebKit
 
 class NightscoutViewController: UIViewController {
-    @IBOutlet var webView: WKWebView!
+    var webView: WKWebView!
+    private var cancellables = Set<AnyCancellable>()
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        if Storage.shared.forceDarkMode.value {
-            overrideUserInterfaceStyle = .dark
-        }
+        view.backgroundColor = .systemBackground
+        overrideUserInterfaceStyle = Storage.shared.appearanceMode.value.userInterfaceStyle
 
-        var url = Storage.shared.url.value
-        let token = Storage.shared.token.value
+        // Create WKWebView programmatically
+        let webConfiguration = WKWebViewConfiguration()
+        webConfiguration.mediaTypesRequiringUserActionForPlayback = []
+        webView = WKWebView(frame: .zero, configuration: webConfiguration)
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(webView)
 
-        if token != "" {
-            url = url + "?token=" + token
-        }
+        let safeArea = view.safeAreaLayoutGuide
+        NSLayoutConstraint.activate([
+            webView.topAnchor.constraint(equalTo: safeArea.topAnchor),
+            webView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            webView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            webView.bottomAnchor.constraint(equalTo: safeArea.bottomAnchor),
+        ])
 
-        guard let myUrl = URL(string: url) else { return }
+        // Listen for appearance setting changes
+        Storage.shared.appearanceMode.$value
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] mode in
+                self?.overrideUserInterfaceStyle = mode.userInterfaceStyle
+            }
+            .store(in: &cancellables)
+
+        guard let myUrl = NightscoutUtils.constructURL(
+            baseURL: Storage.shared.url.value,
+            token: Storage.shared.token.value,
+            endpoint: "",
+            parameters: [:]
+        ) else { return }
 
         let webpagePreferences = WKWebpagePreferences()
         webpagePreferences.allowsContentJavaScript = true
@@ -94,7 +116,7 @@ extension NightscoutViewController: WKNavigationDelegate, WKUIDelegate {
             return false
         }
 
-        NSLog("Should start: \(url.absoluteString)")
+        LogManager.shared.log(category: .nightscout, message: "Web shouldStart: \(LogRedactor.url(url.absoluteString))", isDebug: true)
         return true
     }
 

@@ -3,13 +3,13 @@
 
 import Foundation
 import HealthKit
-import UIKit
 
 extension MainViewController {
     // NS Temporary Target Response Processor
     func processNSTemporaryTarget(entries: [[String: AnyObject]]) {
         tempTargetGraphData.removeAll()
         var activeTempTarget: Int?
+        var activeTempTargetEndAt: TimeInterval?
 
         for (index, currentEntry) in entries.reversed().enumerated() {
             guard let dateStr = currentEntry["timestamp"] as? String ?? currentEntry["created_at"] as? String else { continue }
@@ -28,6 +28,7 @@ extension MainViewController {
                 if let activeIndex = tempTargetGraphData.lastIndex(where: { $0.endDate > dateTimeStamp }) {
                     tempTargetGraphData[activeIndex].endDate = dateTimeStamp
                     activeTempTarget = nil
+                    activeTempTargetEndAt = nil
                 }
                 continue
             }
@@ -52,19 +53,20 @@ extension MainViewController {
 
             let endDate = dateTimeStamp + duration
 
-            let dot = DataStructs.tempTargetStruct(date: dateTimeStamp, endDate: endDate, duration: duration, correctionRange: [Int(targetValue!)], enteredBy: enteredBy, reason: reason)
+            let detail = Treatment.historyEntries(from: currentEntry, date: parsedDate.timeIntervalSince1970) { 0 }.entries.first
+            let dot = DataStructs.tempTargetStruct(date: dateTimeStamp, endDate: endDate, duration: duration, correctionRange: [Int(targetValue!)], enteredBy: enteredBy, reason: reason, detail: detail)
             tempTargetGraphData.append(dot)
 
             // Set activeTempTarget only if it is still active
             let currentTime = Date().timeIntervalSince1970
             if currentTime < endDate {
                 activeTempTarget = Int(targetValue!)
+                activeTempTargetEndAt = dot.scheduledEndDate
             }
         }
 
         if Storage.shared.graphOtherTreatments.value {
             updateTempTargetGraph()
-            updateChartRenderers()
         }
 
         if let target = activeTempTarget {
@@ -74,5 +76,10 @@ extension MainViewController {
         } else {
             Observable.shared.tempTarget.value = nil
         }
+        Observable.shared.tempTargetEndAt.value = activeTempTargetEndAt
+
+        #if !targetEnvironment(macCatalyst)
+            LiveActivityManager.shared.refreshFromCurrentState(reason: "tempTargetChanged")
+        #endif
     }
 }

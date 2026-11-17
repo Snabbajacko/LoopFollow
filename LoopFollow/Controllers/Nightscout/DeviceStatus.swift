@@ -1,10 +1,9 @@
 // LoopFollow
 // DeviceStatus.swift
 
-import Charts
 import Foundation
 import HealthKit
-import UIKit
+import SwiftUI
 
 extension MainViewController {
     func webLoadNSDeviceStatus() {
@@ -36,7 +35,6 @@ extension MainViewController {
     }
 
     func evaluateNotLooping() {
-        guard let statusStackView = LoopStatusLabel.superview as? UIStackView else { return }
         guard let lastLoopTime = Observable.shared.alertLastLoopTime.value, lastLoopTime > 0 else {
             return
         }
@@ -46,35 +44,30 @@ extension MainViewController {
 
         if IsNightscoutEnabled(), (now - lastLoopTime) >= nonLoopingTimeThreshold, lastLoopTime > 0 {
             IsNotLooping = true
-            statusStackView.distribution = .fill
+            Observable.shared.isNotLooping.value = true
 
-            PredictionLabel.isHidden = true
-            LoopStatusLabel.frame = CGRect(x: 0, y: 0, width: statusStackView.frame.width, height: statusStackView.frame.height)
-
-            LoopStatusLabel.textAlignment = .center
-            LoopStatusLabel.text = "⚠️ Not Looping!"
-            LoopStatusLabel.textColor = UIColor.systemYellow
-            LoopStatusLabel.font = UIFont.boldSystemFont(ofSize: 18)
+            Observable.shared.loopStatusText.value = "⚠️ Not Looping!"
+            Observable.shared.loopStatusColor.value = .yellow
+            #if !targetEnvironment(macCatalyst)
+                LiveActivityManager.shared.refreshFromCurrentState(reason: "notLooping")
+            #endif
 
         } else {
             IsNotLooping = false
-            statusStackView.distribution = .fillEqually
-            PredictionLabel.isHidden = false
+            Observable.shared.isNotLooping.value = false
 
-            LoopStatusLabel.textAlignment = .right
-            LoopStatusLabel.font = UIFont.systemFont(ofSize: 17)
-
-            if Storage.shared.forceDarkMode.value {
-                LoopStatusLabel.textColor = UIColor.white
-            } else {
-                LoopStatusLabel.textColor = UIColor.black
-            }
+            Observable.shared.loopStatusColor.value = .primary
+            #if !targetEnvironment(macCatalyst)
+                LiveActivityManager.shared.refreshFromCurrentState(reason: "loopingResumed")
+            #endif
         }
     }
 
     // NS Device Status Response Processor
     func updateDeviceStatusDisplay(jsonDeviceStatus: [[String: AnyObject]]) {
-        infoManager.clearInfoData(types: [.iob, .cob, .battery, .pump, .target, .isf, .carbRatio, .updated, .recBolus, .tdd])
+        let previousIOBText = Observable.shared.iobText.value
+        let previousDeviceWasLoop = Storage.shared.device.value == "Loop"
+        infoManager.clearInfoData(types: [.iob, .cob, .battery, .pump, .pumpBattery, .target, .isf, .carbRatio, .updated, .recBolus, .tdd, .smoothedBG])
 
         // For Loop, clear the current override here - For Trio, it is handled using treatments
         if Storage.shared.device.value == "Loop" {
@@ -99,7 +92,7 @@ extension MainViewController {
 
         Observable.shared.previousAlertLastLoopTime.value = Observable.shared.alertLastLoopTime.value
 
-        if let lastPumpRecord = lastDeviceStatus?["pump"] as! [String: AnyObject]? {
+        if let lastPumpRecord = lastDeviceStatus?["pump"] as? [String: AnyObject] {
             if let bolusIncrement = lastPumpRecord["bolusIncrement"] as? Double, bolusIncrement > 0 {
                 Storage.shared.bolusIncrement.value = HKQuantity(unit: .internationalUnit(), doubleValue: bolusIncrement)
                 Storage.shared.bolusIncrementDetected.value = true
@@ -116,28 +109,71 @@ extension MainViewController {
                 let storedTime = Observable.shared.alertLastLoopTime.value ?? 0
                 if lastPumpTime > storedTime {
                     Observable.shared.alertLastLoopTime.value = lastPumpTime
+                    Storage.shared.lastLoopTime.value = lastPumpTime
                 }
 
-                if let reservoirData = lastPumpRecord["reservoir"] as? Double {
-                    latestPumpVolume = reservoirData
-                    infoManager.updateInfoData(type: .pump, value: String(format: "%.0f", reservoirData) + "U")
-                } else {
+                let reservoir = PumpReservoirResolver.resolve(
+                    reservoir: lastPumpRecord["reservoir"] as? Double,
+                    pumpID: lastPumpRecord["pumpID"] as? String,
+                    manufacturer: lastPumpRecord["manufacturer"] as? String,
+                    model: lastPumpRecord["model"] as? String,
+                    displayOverride: lastPumpRecord["reservoir_display_override"] as? String,
+                    cache: Storage.shared.pumpReservoirCache.value,
+                    date: Date(timeIntervalSince1970: lastPumpTime)
+                )
+                Storage.shared.pumpReservoirCache.value = reservoir.cache
+
+                switch reservoir.state {
+                case let .units(units):
+                    latestPumpVolume = units
+                    infoManager.updateInfoData(type: .pump, value: String(format: "%.0f", units) + "U", numericValue: units)
+                    Storage.shared.lastPumpReservoirU.value = units
+                case .aboveReportingLimit:
+                    // Pumps that only report "50+" get treated as exactly 50, both
+                    // for the volume alarm and for the info row's coloring.
                     latestPumpVolume = 50.0
-                    infoManager.updateInfoData(type: .pump, value: "50+U")
+                    infoManager.updateInfoData(type: .pump, value: "50+U", numericValue: 50.0)
+                    Storage.shared.lastPumpReservoirU.value = nil
+                case let .status(status):
+                    latestPumpVolume = nil
+                    infoManager.updateInfoData(type: .pump, value: status)
+                    Storage.shared.lastPumpReservoirU.value = nil
+                case .unknown:
+                    // The row stays cleared, which the info table renders as an em dash.
+                    latestPumpVolume = nil
+                    Storage.shared.lastPumpReservoirU.value = nil
                 }
+            }
+
+            // Parse pump battery percentage
+            if let pumpBatteryRecord = lastPumpRecord["battery"] as? [String: AnyObject],
+               let pumpBatteryPercent = pumpBatteryRecord["percent"] as? Double
+            {
+                infoManager.updateInfoData(type: .pumpBattery, value: String(format: "%.0f", pumpBatteryPercent) + "%", numericValue: pumpBatteryPercent)
+                Observable.shared.pumpBatteryLevel.value = pumpBatteryPercent
+                latestPumpBatteryDate = Date()
+            } else if let lastPercent = Observable.shared.pumpBatteryLevel.value,
+                      let lastDate = latestPumpBatteryDate,
+                      Date().timeIntervalSince(lastDate) <= 60 * 60
+            {
+                // Some records leave out the pump battery, and the level changes
+                // slowly, so the last reading is shown for up to an hour.
+                infoManager.updateInfoData(type: .pumpBattery, value: String(format: "%.0f", lastPercent) + "%", numericValue: lastPercent)
             }
 
             if let uploader = lastDeviceStatus?["uploader"] as? [String: AnyObject],
                let upbat = uploader["battery"] as? Double
             {
+                let isCharging = uploader["isCharging"] as? Bool
                 let batteryText: String
-                if let isCharging = uploader["isCharging"] as? Bool, isCharging {
+                if isCharging == true {
                     batteryText = "⚡️ " + String(format: "%.0f", upbat) + "%"
                 } else {
                     batteryText = String(format: "%.0f", upbat) + "%"
                 }
-                infoManager.updateInfoData(type: .battery, value: batteryText)
+                infoManager.updateInfoData(type: .battery, value: batteryText, numericValue: upbat)
                 Observable.shared.deviceBatteryLevel.value = upbat
+                Observable.shared.deviceBatteryIsCharging.value = isCharging
 
                 let timestamp = uploader["timestamp"] as? Date ?? Date()
                 let currentBattery = DataStructs.batteryStruct(batteryLevel: upbat, timestamp: timestamp)
@@ -151,7 +187,18 @@ extension MainViewController {
         }
 
         // Loop - handle new data
-        if let lastLoopRecord = lastDeviceStatus?["loop"] as! [String: AnyObject]? {
+        if let lastLoopRecord = lastDeviceStatus?["loop"] as? [String: AnyObject] {
+            // Some pumps report no `pump.clock`; without it alertLastLoopTime stays 0
+            // and the forecast anchors to epoch 0. Fall back to the loop cycle timestamp.
+            if (lastDeviceStatus?["pump"] as? [String: AnyObject])?["clock"] as? String == nil,
+               let loopTimestampString = lastLoopRecord["timestamp"] as? String,
+               let loopTimestamp = formatter.date(from: loopTimestampString)?.timeIntervalSince1970,
+               loopTimestamp > (Observable.shared.alertLastLoopTime.value ?? 0)
+            {
+                Observable.shared.alertLastLoopTime.value = loopTimestamp
+                Storage.shared.lastLoopTime.value = loopTimestamp
+            }
+
             DeviceStatusLoop(formatter: formatter, lastLoopRecord: lastLoopRecord)
 
             var oText = ""
@@ -181,8 +228,19 @@ extension MainViewController {
         }
 
         // OpenAPS - handle new data
-        if let lastLoopRecord = lastDeviceStatus?["openaps"] as! [String: AnyObject]? {
+        if let lastLoopRecord = lastDeviceStatus?["openaps"] as? [String: AnyObject] {
             DeviceStatusOpenAPS(formatter: formatter, lastDeviceStatus: lastDeviceStatus, lastLoopRecord: lastLoopRecord)
+        }
+
+        // If the active looping system flipped (Loop ⇄ Trio/OpenAPS), drop the previous
+        // system's forecast so it doesn't linger next to the one just drawn above.
+        let currentDeviceIsLoop = Storage.shared.device.value == "Loop"
+        if currentDeviceIsLoop != previousDeviceWasLoop {
+            if currentDeviceIsLoop {
+                clearOpenAPSPredictionGraph()
+            } else {
+                clearLoopPredictionGraph()
+            }
         }
 
         // Start the timer based on the timestamp
@@ -190,43 +248,48 @@ extension MainViewController {
         let secondsAgo = now - (Observable.shared.alertLastLoopTime.value ?? 0)
 
         DispatchQueue.main.async {
+            var interval: Double
             if secondsAgo >= (20 * 60) {
-                TaskScheduler.shared.rescheduleTask(
-                    id: .deviceStatus,
-                    to: Date().addingTimeInterval(5 * 60)
-                )
-
+                interval = 5 * 60
             } else if secondsAgo >= (10 * 60) {
-                TaskScheduler.shared.rescheduleTask(
-                    id: .deviceStatus,
-                    to: Date().addingTimeInterval(60)
-                )
-
+                interval = 60
             } else if secondsAgo >= (7 * 60) {
-                TaskScheduler.shared.rescheduleTask(
-                    id: .deviceStatus,
-                    to: Date().addingTimeInterval(30)
-                )
-
+                interval = 30
             } else if secondsAgo >= (5 * 60) {
-                TaskScheduler.shared.rescheduleTask(
-                    id: .deviceStatus,
-                    to: Date().addingTimeInterval(10)
-                )
+                interval = 10
             } else {
-                let interval = (310 - secondsAgo)
-                TaskScheduler.shared.rescheduleTask(
-                    id: .deviceStatus,
-                    to: Date().addingTimeInterval(interval)
-                )
+                interval = 310 - secondsAgo
                 TaskScheduler.shared.rescheduleTask(id: .alarmCheck, to: Date().addingTimeInterval(3))
             }
+
+            if NightscoutSocketManager.shared.connectionState == .authenticated {
+                interval = max(interval * 3, 60)
+            }
+
+            TaskScheduler.shared.rescheduleTask(
+                id: .deviceStatus,
+                to: Date().addingTimeInterval(interval)
+            )
         }
 
         evaluateNotLooping()
 
+        DeviceStatusHistory.shared.ingestLatest(lastDeviceStatus)
+
         // Mark device status as loaded for initial loading state
         markDataLoaded("deviceStatus")
+
+        if Storage.shared.contactEnabled.value, Storage.shared.contactIOB.value != .off,
+           Observable.shared.iobText.value != previousIOBText
+        {
+            contactImageUpdater.updateContactImage(
+                bgValue: Observable.shared.bgText.value,
+                trend: Observable.shared.directionText.value,
+                delta: Observable.shared.deltaText.value,
+                iob: Observable.shared.iobText.value,
+                stale: Observable.shared.bgStale.value
+            )
+        }
 
         LogManager.shared.log(category: .deviceStatus, message: "Update Device Status done", isDebug: true)
     }
